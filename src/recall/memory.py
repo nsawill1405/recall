@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -89,6 +90,7 @@ class Memory:
         query: str,
         top_k: int = 5,
         tags: list[str] | None = None,
+        reranker: str | None = None,
     ) -> list[MemoryResult]:
         self._storage.require_compatible_dimensions()
 
@@ -97,6 +99,8 @@ class Memory:
             raise ValueError("query must be non-empty")
         if top_k <= 0:
             raise ValueError("top_k must be greater than zero")
+        if reranker not in (None, "local"):
+            raise ValueError("reranker must be one of: None, 'local'")
 
         query_embedding = self._embedder.embed(query)
         rows = self._storage.search_memories(
@@ -104,7 +108,7 @@ class Memory:
             top_k=top_k,
             tags=tags,
         )
-        return [
+        results = [
             MemoryResult(
                 id=row["id"],
                 text=row["text"],
@@ -115,6 +119,32 @@ class Memory:
             )
             for row in rows
         ]
+        if reranker == "local":
+            results = _local_lexical_rerank(query=query, results=results)
+        return results
+
+    def find(
+        self,
+        query: str,
+        tags: list[str] | None = None,
+        min_score: float = 0.0,
+        reranker: str | None = None,
+    ) -> MemoryResult | None:
+        if not 0.0 <= min_score <= 1.0:
+            raise ValueError("min_score must be between 0.0 and 1.0")
+        candidate_k = 20 if reranker == "local" else 1
+        results = self.search(
+            query=query,
+            top_k=candidate_k,
+            tags=tags,
+            reranker=reranker,
+        )
+        if not results:
+            return None
+        best = results[0]
+        if best.score < min_score:
+            return None
+        return best
 
     def forget(self, id: str | None = None, tag: str | None = None) -> int:
         self._storage.require_compatible_dimensions()
@@ -224,8 +254,18 @@ class AsyncMemory:
         query: str,
         top_k: int = 5,
         tags: list[str] | None = None,
+        reranker: str | None = None,
     ) -> list[MemoryResult]:
-        return await asyncio.to_thread(self._memory.search, query, top_k, tags)
+        return await asyncio.to_thread(self._memory.search, query, top_k, tags, reranker)
+
+    async def find(
+        self,
+        query: str,
+        tags: list[str] | None = None,
+        min_score: float = 0.0,
+        reranker: str | None = None,
+    ) -> MemoryResult | None:
+        return await asyncio.to_thread(self._memory.find, query, tags, min_score, reranker)
 
     async def forget(self, id: str | None = None, tag: str | None = None) -> int:
         return await asyncio.to_thread(self._memory.forget, id, tag)
@@ -261,3 +301,46 @@ def _to_datetime_required(value: int | None) -> datetime:
     if converted is None:
         raise ValueError("Expected datetime value but received None.")
     return converted
+
+
+def _local_lexical_rerank(query: str, results: list[MemoryResult]) -> list[MemoryResult]:
+    query_tokens = _tokenize(query)
+    reranked = sorted(
+        results,
+        key=lambda item: _blend_scores(
+            item.score,
+            _token_overlap(query_tokens, _tokenize(item.text)),
+        ),
+        reverse=True,
+    )
+    normalized: list[MemoryResult] = []
+    for item in reranked:
+        lexical = _token_overlap(query_tokens, _tokenize(item.text))
+        blended = _blend_scores(item.score, lexical)
+        normalized.append(
+            MemoryResult(
+                id=item.id,
+                text=item.text,
+                score=blended,
+                tags=item.tags,
+                created_at=item.created_at,
+                expires_at=item.expires_at,
+            )
+        )
+    return normalized
+
+
+def _tokenize(text: str) -> set[str]:
+    return {token for token in re.findall(r"[a-zA-Z0-9]+", text.lower()) if token}
+
+
+def _token_overlap(query_tokens: set[str], text_tokens: set[str]) -> float:
+    if not query_tokens or not text_tokens:
+        return 0.0
+    overlap = len(query_tokens.intersection(text_tokens))
+    return overlap / len(query_tokens)
+
+
+def _blend_scores(vector_score: float, lexical_score: float) -> float:
+    blended = (vector_score * 0.75) + (lexical_score * 0.25)
+    return max(0.0, min(1.0, blended))

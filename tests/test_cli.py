@@ -57,6 +57,10 @@ def test_cli_search_list_forget_stats_rebuild(db_path: Path) -> None:
     assert search_run.returncode == 0
     assert "CLI seeded memory" in search_run.stdout
 
+    find_run = _run_cli(*base_args, "find", "seeded", "--min-score", "0.0", env=env)
+    assert find_run.returncode == 0
+    assert "CLI seeded memory" in find_run.stdout
+
     redact_run = _run_cli(
         *base_args,
         "redact",

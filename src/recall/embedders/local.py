@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import warnings
 
 from .base import BaseEmbedder
 
@@ -24,6 +25,12 @@ class LocalEmbedder(BaseEmbedder):
         except ImportError:
             self.model = "hash-embedding-v1"
             self.dimension = 384
+            warnings.warn(
+                "sentence-transformers is not installed; using non-semantic hash embeddings. "
+                "Install recall[local] for semantic local retrieval.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return
 
         self._backend = "sentence-transformers"

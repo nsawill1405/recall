@@ -1,8 +1,8 @@
 # recall
 
-Local-first memory for Python apps and AI agents. One file on disk, with a tiny API: `store()`, `search()`, `forget()`, `redact()`.
+Local-first memory for Python apps and AI agents. One file on disk, with a tiny API: `store()`, `find()`, `search()`, `forget()`, `redact()`.
 
-`recall-ai` (PyPI) installs with import path `recall`.
+`recall` installs with import path `recall`.
 
 Use it for:
 
@@ -12,13 +12,13 @@ Use it for:
 ## Install
 
 ```bash
-pip install recall-ai
+pip install recall
 ```
 
 Optional local sentence-transformer embeddings:
 
 ```bash
-pip install "recall-ai[local]"
+pip install "recall[local]"
 ```
 
 ## 10-second quickstart
@@ -32,9 +32,9 @@ mem.store("User prefers short responses")
 mem.store("Project uses FastAPI", tags=["project"])
 mem.store("Favorite coffee: flat white", tags=["profile"])
 
-results = mem.search("what does the user prefer?", top_k=3)
-for r in results:
-    print(r.text, r.score)
+best = mem.find("what does the user prefer?")
+if best:
+    print(best.text, best.score)
 
 mem.forget(tag="project")
 ```
@@ -49,8 +49,9 @@ from recall import Memory
 mem = Memory(path="./app.db", namespace="user_abc")
 mem.store("Remember this", tags=["note"], ttl_days=7)
 mem.redact(id="<memory-id>", remove="sensitive token")
-results = mem.search("what should we remember?", top_k=5, tags=["note"])
-deleted = mem.forget(id=results[0].id)
+best = mem.find("what should we remember?", tags=["note"], min_score=0.45)
+if best:
+    deleted = mem.forget(id=best.id)
 ```
 
 ### Async
@@ -61,9 +62,12 @@ from recall import AsyncMemory
 mem = AsyncMemory()
 await mem.store("Remember this")
 await mem.redact(id="<memory-id>", remove="sensitive token")
-results = await mem.search("what should we remember?")
-await mem.forget(id=results[0].id)
+best = await mem.find("what should we remember?", min_score=0.45)
+if best:
+    await mem.forget(id=best.id)
 ```
+
+Use `find()` when you want one best result. Use `search()` when you need ranked lists.
 
 ## Provider behavior
 
@@ -82,10 +86,12 @@ Memory(embedder="local", model="sentence-transformers/all-MiniLM-L6-v2")
 ```
 
 Default local mode uses sentence-transformers when available. If not installed, it falls back to a deterministic hash embedder so the library stays usable offline.
+The hash fallback is non-semantic and intended as a last-resort dev fallback, not production-quality retrieval.
 
 ## CLI
 
 ```bash
+recall find "user preferences" --min-score 0.5
 recall search "user preferences" --top-k 5
 recall list --limit 20
 recall forget --id <memory-id>
@@ -101,6 +107,7 @@ Common flags:
 - `--namespace user_abc`
 - `--embedder openai|anthropic|cohere|local`
 - `--model <provider-model-name>`
+- `--reranker local` (optional lexical reranking for `find`/`search`)
 
 ## Embedding migration and dimension mismatch
 

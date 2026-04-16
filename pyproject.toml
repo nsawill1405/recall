@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "recall-ai"
+name = "recall"
 version = "0.1.0"
 description = "Local-first memory for Python apps and AI agents"
 readme = "README.md"

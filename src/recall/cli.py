@@ -26,6 +26,23 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query", help="Search query text")
     search.add_argument("--top-k", type=int, default=5, help="Number of results")
     search.add_argument("--tag", action="append", default=None, help="Filter by tag (repeatable)")
+    search.add_argument(
+        "--reranker",
+        default=None,
+        choices=["local"],
+        help="Optional reranker strategy",
+    )
+
+    find = subparsers.add_parser("find", help="Find the best memory match")
+    find.add_argument("query", help="Query text")
+    find.add_argument("--tag", action="append", default=None, help="Filter by tag (repeatable)")
+    find.add_argument("--min-score", type=float, default=0.0, help="Minimum accepted score")
+    find.add_argument(
+        "--reranker",
+        default=None,
+        choices=["local"],
+        help="Optional reranker strategy",
+    )
 
     list_cmd = subparsers.add_parser("list", help="List latest memories")
     list_cmd.add_argument("--limit", type=int, default=20, help="Max memories")
@@ -62,7 +79,9 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             if args.command == "search":
-                return _run_search(memory, args.query, args.top_k, args.tag)
+                return _run_search(memory, args.query, args.top_k, args.tag, args.reranker)
+            if args.command == "find":
+                return _run_find(memory, args.query, args.tag, args.min_score, args.reranker)
             if args.command == "list":
                 return _run_list(memory, args.limit)
             if args.command == "forget":
@@ -85,8 +104,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def _run_search(memory: Memory, query: str, top_k: int, tags: list[str] | None) -> int:
-    results = memory.search(query, top_k=top_k, tags=tags)
+def _run_search(
+    memory: Memory,
+    query: str,
+    top_k: int,
+    tags: list[str] | None,
+    reranker: str | None,
+) -> int:
+    results = memory.search(query, top_k=top_k, tags=tags, reranker=reranker)
     if not results:
         print("No memories found.")
         return 0
@@ -96,6 +121,24 @@ def _run_search(memory: Memory, query: str, top_k: int, tags: list[str] | None) 
             f"[{item.score:.3f}] {item.id}  {item.text} "
             f"(tags={item.tags}, created={_fmt(item.created_at)})"
         )
+    return 0
+
+
+def _run_find(
+    memory: Memory,
+    query: str,
+    tags: list[str] | None,
+    min_score: float,
+    reranker: str | None,
+) -> int:
+    result = memory.find(query=query, tags=tags, min_score=min_score, reranker=reranker)
+    if result is None:
+        print("No memory found.")
+        return 0
+    print(
+        f"[{result.score:.3f}] {result.id}  {result.text} "
+        f"(tags={result.tags}, created={_fmt(result.created_at)})"
+    )
     return 0
 
 

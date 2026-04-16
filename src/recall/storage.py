@@ -616,10 +616,8 @@ class SQLiteStorage:
                 WHERE namespace = ?
                   AND is_current = 1
                   AND (expires_at IS NULL OR expires_at > ?)
-                ORDER BY created_at DESC
-                LIMIT ?
                 """,
-                (self.namespace, now, max(limit * 25, 1000)),
+                (self.namespace, now),
             ).fetchall()
 
     def _vector_param(self, embedding: list[float]) -> bytes:
