@@ -18,7 +18,7 @@ Use it for:
 Not on PyPI yet — install from source:
 
 ```bash
-git clone https://github.com/nsawill/recall.git
+git clone https://github.com/nsawill1405/recall.git
 cd recall
 pip install -e .
 ```
