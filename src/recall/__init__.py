@@ -1,6 +1,6 @@
 from .errors import DimensionMismatchError, RecallError
 from .memory import AsyncMemory, Memory
-from .types import MemoryResult
+from .types import MemoryResult, StoreItem
 
 __all__ = [
     "AsyncMemory",
@@ -8,4 +8,5 @@ __all__ = [
     "Memory",
     "MemoryResult",
     "RecallError",
+    "StoreItem",
 ]

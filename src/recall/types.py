@@ -12,3 +12,10 @@ class MemoryResult:
     tags: list[str]
     created_at: datetime
     expires_at: datetime | None
+
+
+@dataclass(slots=True)
+class StoreItem:
+    text: str
+    tags: list[str] | None = None
+    ttl_days: int | None = None

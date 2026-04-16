@@ -10,7 +10,10 @@ from .memory import Memory
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="recall", description="Local-first AI memory library")
+    parser = argparse.ArgumentParser(
+        prog="recall",
+        description="Local-first memory for Python applications.",
+    )
     parser.add_argument(
         "--path",
         default=None,
@@ -55,7 +58,40 @@ def build_parser() -> argparse.ArgumentParser:
     redact.add_argument("--id", required=True, help="Current memory ID")
     redact.add_argument("--remove", required=True, help="Literal text to remove")
 
+    edit = subparsers.add_parser("edit", help="Create an edited current version of a memory")
+    edit.add_argument("--id", required=True, help="Current memory ID")
+    edit.add_argument("--text", default=None, help="Replacement text")
+    edit.add_argument("--tag", action="append", default=None, help="Replacement tag (repeatable)")
+    edit.add_argument("--ttl-days", type=int, default=None, help="Replacement TTL in days")
+    edit.add_argument(
+        "--clear-tags",
+        action="store_true",
+        help="Clear all tags",
+    )
+    edit.add_argument(
+        "--clear-ttl",
+        action="store_true",
+        help="Remove existing TTL",
+    )
+
     subparsers.add_parser("stats", help="Show memory stats")
+    subparsers.add_parser("prune", help="Delete fully expired memory lineages")
+    export_cmd = subparsers.add_parser("export", help="Export namespace memories as JSONL")
+    export_cmd.add_argument("--out", required=True, help="Output JSONL path")
+    export_cmd.add_argument(
+        "--include-history",
+        action="store_true",
+        help="Include internal non-current lineage rows",
+    )
+
+    import_cmd = subparsers.add_parser("import", help="Import memories from JSONL")
+    import_cmd.add_argument("--in", dest="in_path", required=True, help="Input JSONL path")
+    import_cmd.add_argument(
+        "--conflict",
+        choices=["skip", "overwrite", "new"],
+        default="skip",
+        help="Conflict strategy when IDs already exist",
+    )
 
     subparsers.add_parser("rebuild-index", help="Rebuild embeddings and vector index")
 
@@ -88,8 +124,24 @@ def main(argv: list[str] | None = None) -> int:
                 return _run_forget(memory, args.id, args.tag)
             if args.command == "redact":
                 return _run_redact(memory, args.id, args.remove)
+            if args.command == "edit":
+                return _run_edit(
+                    memory,
+                    memory_id=args.id,
+                    text=args.text,
+                    tags=args.tag,
+                    ttl_days=args.ttl_days,
+                    clear_tags=args.clear_tags,
+                    clear_ttl=args.clear_ttl,
+                )
             if args.command == "stats":
                 return _run_stats(memory)
+            if args.command == "prune":
+                return _run_prune(memory)
+            if args.command == "export":
+                return _run_export(memory, out_path=args.out, include_history=args.include_history)
+            if args.command == "import":
+                return _run_import(memory, in_path=args.in_path, conflict=args.conflict)
             if args.command == "rebuild-index":
                 return _run_rebuild(memory)
             parser.error(f"unknown command: {args.command}")
@@ -169,9 +221,56 @@ def _run_redact(memory: Memory, memory_id: str, remove: str) -> int:
     return 0
 
 
+def _run_edit(
+    memory: Memory,
+    memory_id: str,
+    text: str | None,
+    tags: list[str] | None,
+    ttl_days: int | None,
+    clear_tags: bool,
+    clear_ttl: bool,
+) -> int:
+    if clear_tags and tags is not None:
+        raise ValueError("cannot use --tag with --clear-tags")
+    if clear_ttl and ttl_days is not None:
+        raise ValueError("cannot use --ttl-days with --clear-ttl")
+
+    effective_tags = [] if clear_tags else tags
+    effective_ttl_days = 0 if clear_ttl else ttl_days
+    if text is None and effective_tags is None and effective_ttl_days is None:
+        raise ValueError("edit requires at least one change")
+
+    new_id = memory.edit(
+        id=memory_id,
+        text=text,
+        tags=effective_tags,
+        ttl_days=effective_ttl_days,
+    )
+    print(f"Created edited memory {new_id}.")
+    return 0
+
+
 def _run_stats(memory: Memory) -> int:
     stats = memory.stats()
     print(json.dumps(stats, indent=2, sort_keys=True))
+    return 0
+
+
+def _run_prune(memory: Memory) -> int:
+    deleted = memory.prune_expired()
+    print(f"Pruned {deleted} memories.")
+    return 0
+
+
+def _run_export(memory: Memory, out_path: str, include_history: bool) -> int:
+    exported = memory.export_jsonl(path=out_path, include_history=include_history)
+    print(f"Exported {exported} memories to {out_path}.")
+    return 0
+
+
+def _run_import(memory: Memory, in_path: str, conflict: str) -> int:
+    imported = memory.import_jsonl(path=in_path, conflict=conflict)
+    print(f"Imported {imported} memories from {in_path}.")
     return 0
 
 

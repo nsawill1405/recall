@@ -37,13 +37,18 @@ class SQLiteStorage:
         *,
         allow_dimension_mismatch: bool = False,
         vec_module: Any | None = None,
+        max_scan_rows: int | None = None,
     ) -> None:
+        if max_scan_rows is not None and max_scan_rows <= 0:
+            raise ValueError("max_scan_rows must be greater than zero when provided")
+
         self.db_path = db_path
         self.namespace = namespace
         self.embedder_name = embedder_name
         self.embedder_model = embedder_model
         self.embedder_dimension = embedder_dimension
         self.allow_dimension_mismatch = allow_dimension_mismatch
+        self.max_scan_rows = max_scan_rows
 
         self._lock = threading.RLock()
         self._vector_backend = "sqlite"
@@ -53,6 +58,7 @@ class SQLiteStorage:
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
 
+        self._configure_connection()
         self._vec_loaded = self._load_vec_extension()
         self._run_base_migrations()
         self._dimension_mismatch: DimensionMismatchError | None = self._validate_metadata()
@@ -86,47 +92,58 @@ class SQLiteStorage:
         expires_at: int | None,
     ) -> str:
         memory_id = uuid.uuid4().hex
-        memory_blob = _serialize_embedding(embedding)
-
+        memory_blob, vector_payload = self._embedding_payloads(embedding)
         with self._lock, self._conn:
-            self._conn.execute(
-                """
-                INSERT INTO memories (
-                    id,
-                    root_id,
-                    replaces_id,
-                    is_current,
-                    namespace,
-                    text,
-                    embedding,
-                    tags,
-                    created_at,
-                    expires_at
-                )
-                VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    memory_id,
-                    memory_id,
-                    self.namespace,
-                    text,
-                    memory_blob,
-                    json.dumps(tags),
-                    created_at,
-                    expires_at,
-                ),
-            )
-            self._conn.execute(
-                "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?, ?)",
-                (memory_id, self._vector_param(embedding)),
+            self._insert_memory_row(
+                memory_id=memory_id,
+                root_id=memory_id,
+                replaces_id=None,
+                is_current=True,
+                namespace=self.namespace,
+                text=text,
+                memory_blob=memory_blob,
+                tags=tags,
+                created_at=created_at,
+                expires_at=expires_at,
+                vector_payload=vector_payload,
             )
         return memory_id
+
+    def insert_many_memories(self, items: list[dict[str, Any]]) -> list[str]:
+        if not items:
+            return []
+
+        memory_ids: list[str] = []
+        with self._lock, self._conn:
+            for item in items:
+                memory_id = uuid.uuid4().hex
+                memory_blob, vector_payload = self._embedding_payloads(item["embedding"])
+                self._insert_memory_row(
+                    memory_id=memory_id,
+                    root_id=memory_id,
+                    replaces_id=None,
+                    is_current=True,
+                    namespace=self.namespace,
+                    text=str(item["text"]),
+                    memory_blob=memory_blob,
+                    tags=[str(tag) for tag in item.get("tags", [])],
+                    created_at=int(item["created_at"]),
+                    expires_at=(
+                        int(item["expires_at"])
+                        if item.get("expires_at") is not None
+                        else None
+                    ),
+                    vector_payload=vector_payload,
+                )
+                memory_ids.append(memory_id)
+
+        return memory_ids
 
     def get_current_memory(self, memory_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
                 """
-                SELECT id, root_id, namespace, text, tags, created_at, expires_at
+                SELECT id, root_id, namespace, text, embedding, tags, created_at, expires_at
                 FROM memories
                 WHERE id = ?
                   AND namespace = ?
@@ -143,6 +160,7 @@ class SQLiteStorage:
             "root_id": str(row["root_id"]),
             "namespace": str(row["namespace"]),
             "text": str(row["text"]),
+            "embedding": bytes(row["embedding"]),
             "tags": _parse_tags(row["tags"]),
             "created_at": int(row["created_at"]),
             "expires_at": int(row["expires_at"]) if row["expires_at"] is not None else None,
@@ -158,10 +176,80 @@ class SQLiteStorage:
         created_at: int,
         expires_at: int | None,
     ) -> str:
+        return self._insert_versioned_memory(
+            previous_id=previous_id,
+            root_id=root_id,
+            text=redacted_text,
+            tags=tags,
+            created_at=created_at,
+            expires_at=expires_at,
+            new_embedding=embedding,
+        )
+
+    def insert_edited_memory(
+        self,
+        previous_id: str,
+        root_id: str,
+        text: str,
+        tags: list[str],
+        created_at: int,
+        expires_at: int | None,
+        new_embedding: list[float] | None,
+    ) -> str:
+        return self._insert_versioned_memory(
+            previous_id=previous_id,
+            root_id=root_id,
+            text=text,
+            tags=tags,
+            created_at=created_at,
+            expires_at=expires_at,
+            new_embedding=new_embedding,
+        )
+
+    def _insert_versioned_memory(
+        self,
+        previous_id: str,
+        root_id: str,
+        text: str,
+        tags: list[str],
+        created_at: int,
+        expires_at: int | None,
+        new_embedding: list[float] | None,
+    ) -> str:
         new_id = uuid.uuid4().hex
-        memory_blob = _serialize_embedding(embedding)
 
         with self._lock, self._conn:
+            previous = self._conn.execute(
+                """
+                SELECT id, embedding
+                FROM memories
+                WHERE id = ?
+                  AND namespace = ?
+                  AND is_current = 1
+                """,
+                (previous_id, self.namespace),
+            ).fetchone()
+            if previous is None:
+                raise ValueError("memory id not found in current namespace")
+
+            if new_embedding is None:
+                memory_blob = bytes(previous["embedding"])
+                vector_row = self._conn.execute(
+                    "SELECT embedding FROM vec_index WHERE memory_id = ?",
+                    (previous_id,),
+                ).fetchone()
+                if vector_row is not None and vector_row["embedding"] is not None:
+                    vector_payload = bytes(vector_row["embedding"])
+                else:
+                    vector_payload = self._vector_param(
+                        _deserialize_embedding(
+                            memory_blob,
+                            expected_dimension=self.current_dimension,
+                        )
+                    )
+            else:
+                memory_blob, vector_payload = self._embedding_payloads(new_embedding)
+
             cursor = self._conn.execute(
                 """
                 UPDATE memories
@@ -175,39 +263,20 @@ class SQLiteStorage:
             if int(cursor.rowcount or 0) != 1:
                 raise ValueError("memory id not found in current namespace")
 
-            self._conn.execute(
-                """
-                INSERT INTO memories (
-                    id,
-                    root_id,
-                    replaces_id,
-                    is_current,
-                    namespace,
-                    text,
-                    embedding,
-                    tags,
-                    created_at,
-                    expires_at
-                )
-                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    new_id,
-                    root_id,
-                    previous_id,
-                    self.namespace,
-                    redacted_text,
-                    memory_blob,
-                    json.dumps(tags),
-                    created_at,
-                    expires_at,
-                ),
+            self._insert_memory_row(
+                memory_id=new_id,
+                root_id=root_id,
+                replaces_id=previous_id,
+                is_current=True,
+                namespace=self.namespace,
+                text=text,
+                memory_blob=memory_blob,
+                tags=tags,
+                created_at=created_at,
+                expires_at=expires_at,
+                vector_payload=vector_payload,
             )
             self._conn.execute("DELETE FROM vec_index WHERE memory_id = ?", (previous_id,))
-            self._conn.execute(
-                "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?, ?)",
-                (new_id, self._vector_param(embedding)),
-            )
 
         return new_id
 
@@ -240,6 +309,28 @@ class SQLiteStorage:
             if tag in parsed_tags and row["root_id"] is not None:
                 root_ids.add(str(row["root_id"]))
 
+        return self._delete_lineages(root_ids)
+
+    def prune_expired_lineages(self) -> int:
+        now = _unixepoch()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT root_id
+                FROM memories
+                WHERE namespace = ?
+                  AND is_current = 1
+                  AND expires_at IS NOT NULL
+                  AND expires_at <= ?
+                """,
+                (self.namespace, now),
+            ).fetchall()
+
+        root_ids = {
+            str(row["root_id"])
+            for row in rows
+            if row["root_id"] is not None
+        }
         return self._delete_lineages(root_ids)
 
     def _delete_lineages(self, root_ids: set[str]) -> int:
@@ -396,7 +487,7 @@ class SQLiteStorage:
             yield str(row["id"]), str(row["text"])
 
     def replace_embedding(self, memory_id: str, embedding: list[float]) -> None:
-        memory_blob = _serialize_embedding(embedding)
+        memory_blob, vector_payload = self._embedding_payloads(embedding)
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE memories SET embedding = ? WHERE id = ?",
@@ -404,7 +495,7 @@ class SQLiteStorage:
             )
             self._conn.execute(
                 "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?, ?)",
-                (memory_id, self._vector_param(embedding)),
+                (memory_id, vector_payload),
             )
 
     def reconfigure_embedding_space(self, provider: str, model: str, dimension: int) -> None:
@@ -423,9 +514,162 @@ class SQLiteStorage:
         self.embedder_dimension = dimension
         self._dimension_mismatch = None
 
+    def export_rows(self, namespace: str, include_history: bool = False) -> list[dict[str, Any]]:
+        with self._lock:
+            if include_history:
+                rows = self._conn.execute(
+                    """
+                    SELECT
+                        id,
+                        root_id,
+                        replaces_id,
+                        is_current,
+                        namespace,
+                        text,
+                        tags,
+                        created_at,
+                        expires_at
+                    FROM memories
+                    WHERE namespace = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (namespace,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT
+                        id,
+                        namespace,
+                        text,
+                        tags,
+                        created_at,
+                        expires_at
+                    FROM memories
+                    WHERE namespace = ?
+                      AND is_current = 1
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (namespace,),
+                ).fetchall()
+
+        exported: list[dict[str, Any]] = []
+        for row in rows:
+            memory_id = str(row["id"])
+            if include_history:
+                root_id = str(row["root_id"]) if row["root_id"] else memory_id
+                replaces_id = str(row["replaces_id"]) if row["replaces_id"] else None
+                is_current = bool(row["is_current"])
+            else:
+                root_id = memory_id
+                replaces_id = None
+                is_current = True
+
+            exported.append(
+                {
+                    "id": memory_id,
+                    "root_id": root_id,
+                    "replaces_id": replaces_id,
+                    "is_current": is_current,
+                    "namespace": str(row["namespace"]),
+                    "text": str(row["text"]),
+                    "tags": _parse_tags(row["tags"]),
+                    "created_at": int(row["created_at"]),
+                    "expires_at": (
+                        int(row["expires_at"]) if row["expires_at"] is not None else None
+                    ),
+                }
+            )
+
+        return exported
+
+    def import_prepared_rows(
+        self,
+        rows: list[dict[str, Any]],
+        target_namespace: str,
+        conflict: str,
+    ) -> int:
+        if conflict not in {"skip", "overwrite", "new"}:
+            raise ValueError("conflict must be one of: skip, overwrite, new")
+        if not rows:
+            return 0
+
+        id_map = self._build_id_map_for_new(rows, target_namespace) if conflict == "new" else {}
+
+        imported = 0
+        with self._lock, self._conn:
+            for row in rows:
+                source_id = str(row["id"])
+                memory_id = id_map.get(source_id, source_id)
+
+                source_root = str(row.get("root_id") or source_id)
+                source_replaces = row.get("replaces_id")
+
+                root_id = id_map.get(source_root, source_root)
+                replaces_id = None
+                if source_replaces is not None:
+                    replaces_id = id_map.get(str(source_replaces), str(source_replaces))
+
+                exists = self._conn.execute(
+                    "SELECT 1 FROM memories WHERE id = ? AND namespace = ?",
+                    (memory_id, target_namespace),
+                ).fetchone()
+
+                if exists is not None:
+                    if conflict == "skip":
+                        continue
+                    if conflict == "overwrite":
+                        self._conn.execute(
+                            "DELETE FROM memories WHERE id = ? AND namespace = ?",
+                            (memory_id, target_namespace),
+                        )
+                        self._conn.execute(
+                            "DELETE FROM vec_index WHERE memory_id = ?",
+                            (memory_id,),
+                        )
+                    else:
+                        raise RuntimeError(
+                            "unexpected id collision while importing with conflict='new'"
+                        )
+
+                embedding_values = row.get("embedding")
+                if embedding_values is None:
+                    raise ValueError("prepared import rows must include an embedding")
+
+                memory_blob, vector_payload = self._embedding_payloads(embedding_values)
+                is_current = bool(row.get("is_current", True))
+                self._insert_memory_row(
+                    memory_id=memory_id,
+                    root_id=root_id,
+                    replaces_id=replaces_id,
+                    is_current=is_current,
+                    namespace=target_namespace,
+                    text=str(row["text"]),
+                    memory_blob=memory_blob,
+                    tags=[str(tag) for tag in row.get("tags", [])],
+                    created_at=int(row["created_at"]),
+                    expires_at=(
+                        int(row["expires_at"])
+                        if row.get("expires_at") is not None
+                        else None
+                    ),
+                    vector_payload=vector_payload,
+                )
+                imported += 1
+
+            self._normalize_current_versions_locked(target_namespace)
+
+        return imported
+
     def require_compatible_dimensions(self) -> None:
         if self._dimension_mismatch is not None:
             raise self._dimension_mismatch
+
+    def _configure_connection(self) -> None:
+        with self._lock:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
 
     def _run_base_migrations(self) -> None:
         with self._lock, self._conn:
@@ -609,6 +853,18 @@ class SQLiteStorage:
                 self._vector_backend = "sqlite"
 
         with self._lock:
+            if self.max_scan_rows is None:
+                return self._conn.execute(
+                    """
+                    SELECT id, text, tags, created_at, expires_at, embedding
+                    FROM memories
+                    WHERE namespace = ?
+                      AND is_current = 1
+                      AND (expires_at IS NULL OR expires_at > ?)
+                    """,
+                    (self.namespace, now),
+                ).fetchall()
+
             return self._conn.execute(
                 """
                 SELECT id, text, tags, created_at, expires_at, embedding
@@ -616,8 +872,9 @@ class SQLiteStorage:
                 WHERE namespace = ?
                   AND is_current = 1
                   AND (expires_at IS NULL OR expires_at > ?)
+                LIMIT ?
                 """,
-                (self.namespace, now),
+                (self.namespace, now, self.max_scan_rows),
             ).fetchall()
 
     def _vector_param(self, embedding: list[float]) -> bytes:
@@ -626,6 +883,140 @@ class SQLiteStorage:
             if callable(serializer):
                 return serializer(embedding)
         return _serialize_embedding(embedding)
+
+    def _embedding_payloads(self, embedding: list[float]) -> tuple[bytes, bytes]:
+        memory_blob = _serialize_embedding(embedding)
+        vector_payload = self._vector_param(embedding)
+        return memory_blob, vector_payload
+
+    def _insert_memory_row(
+        self,
+        *,
+        memory_id: str,
+        root_id: str,
+        replaces_id: str | None,
+        is_current: bool,
+        namespace: str,
+        text: str,
+        memory_blob: bytes,
+        tags: list[str],
+        created_at: int,
+        expires_at: int | None,
+        vector_payload: bytes,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO memories (
+                id,
+                root_id,
+                replaces_id,
+                is_current,
+                namespace,
+                text,
+                embedding,
+                tags,
+                created_at,
+                expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                root_id,
+                replaces_id,
+                1 if is_current else 0,
+                namespace,
+                text,
+                memory_blob,
+                json.dumps(tags),
+                created_at,
+                expires_at,
+            ),
+        )
+        if is_current:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?, ?)",
+                (memory_id, vector_payload),
+            )
+
+    def _build_id_map_for_new(
+        self,
+        rows: list[dict[str, Any]],
+        target_namespace: str,
+    ) -> dict[str, str]:
+        source_ids = sorted({str(row["id"]) for row in rows})
+        id_map: dict[str, str] = {}
+        used = set()
+
+        with self._lock:
+            for source_id in source_ids:
+                candidate = uuid.uuid4().hex
+                while (
+                    candidate in used
+                    or self._conn.execute(
+                        "SELECT 1 FROM memories WHERE id = ? AND namespace = ?",
+                        (candidate, target_namespace),
+                    ).fetchone()
+                    is not None
+                ):
+                    candidate = uuid.uuid4().hex
+                id_map[source_id] = candidate
+                used.add(candidate)
+
+        return id_map
+
+    def _normalize_current_versions_locked(self, namespace: str) -> None:
+        roots = self._conn.execute(
+            "SELECT DISTINCT root_id FROM memories WHERE namespace = ?",
+            (namespace,),
+        ).fetchall()
+
+        for root in roots:
+            root_id = root["root_id"]
+            if root_id is None:
+                continue
+
+            versions = self._conn.execute(
+                """
+                SELECT id, embedding
+                FROM memories
+                WHERE namespace = ?
+                  AND root_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (namespace, root_id),
+            ).fetchall()
+            if not versions:
+                continue
+
+            winner_id = str(versions[0]["id"])
+            self._conn.execute(
+                """
+                UPDATE memories
+                SET is_current = CASE WHEN id = ? THEN 1 ELSE 0 END
+                WHERE namespace = ?
+                  AND root_id = ?
+                """,
+                (winner_id, namespace, root_id),
+            )
+
+            losers = [str(row["id"]) for row in versions[1:]]
+            for loser_id in losers:
+                self._conn.execute("DELETE FROM vec_index WHERE memory_id = ?", (loser_id,))
+
+            winner_vec = self._conn.execute(
+                "SELECT 1 FROM vec_index WHERE memory_id = ?",
+                (winner_id,),
+            ).fetchone()
+            if winner_vec is None:
+                winner_embedding = _deserialize_embedding(
+                    bytes(versions[0]["embedding"]),
+                    expected_dimension=self.current_dimension,
+                )
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?, ?)",
+                    (winner_id, self._vector_param(winner_embedding)),
+                )
 
     def _set_meta(self, key: str, value: str) -> None:
         with self._lock, self._conn:
