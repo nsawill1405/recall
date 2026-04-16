@@ -57,13 +57,37 @@ def test_cli_search_list_forget_stats_rebuild(db_path: Path) -> None:
     assert search_run.returncode == 0
     assert "CLI seeded memory" in search_run.stdout
 
+    redact_run = _run_cli(
+        *base_args,
+        "redact",
+        "--id",
+        memory_id,
+        "--remove",
+        "seeded",
+        env=env,
+    )
+    assert redact_run.returncode == 0
+    assert "removed 1 occurrence" in redact_run.stdout
+
+    redact_fail_run = _run_cli(
+        *base_args,
+        "redact",
+        "--id",
+        memory_id,
+        "--remove",
+        "seeded",
+        env=env,
+    )
+    assert redact_fail_run.returncode == 1
+    assert "memory id not found in current namespace" in redact_fail_run.stderr
+
     stats_run = _run_cli(*base_args, "stats", env=env)
     assert stats_run.returncode == 0
     assert '"total": 1' in stats_run.stdout
 
     forget_run = _run_cli(*base_args, "forget", "--tag", "cli", env=env)
     assert forget_run.returncode == 0
-    assert "Deleted 1 memories." in forget_run.stdout
+    assert "Deleted 2 memories." in forget_run.stdout
 
     rebuild_run = _run_cli(*base_args, "rebuild-index", env=env)
     assert rebuild_run.returncode == 0

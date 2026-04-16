@@ -126,6 +126,44 @@ class Memory:
             return self._storage.delete_memory_by_id(memory_id=id)
         return self._storage.delete_memory_by_tag(tag=tag or "")
 
+    def redact(self, id: str, remove: str) -> str:
+        new_id, _removed_count = self._redact_internal(id=id, remove=remove)
+        return new_id
+
+    def _redact_internal(self, id: str, remove: str) -> tuple[str, int]:
+        self._storage.require_compatible_dimensions()
+
+        memory_id = id.strip()
+        if not memory_id:
+            raise ValueError("id must be non-empty")
+        if remove == "":
+            raise ValueError("remove must be non-empty")
+
+        current = self._storage.get_current_memory(memory_id)
+        if current is None:
+            raise ValueError("memory id not found in current namespace")
+
+        source_text = str(current["text"])
+        removed_count = source_text.count(remove)
+        if removed_count == 0:
+            raise ValueError("remove text not found in memory")
+
+        redacted_text = source_text.replace(remove, "")
+        if not redacted_text.strip():
+            raise ValueError("redaction would leave empty memory text")
+
+        embedding = self._embedder.embed(redacted_text)
+        new_id = self._storage.insert_redacted_memory(
+            previous_id=current["id"],
+            root_id=current["root_id"],
+            redacted_text=redacted_text,
+            embedding=embedding,
+            tags=current["tags"],
+            created_at=_now_ts(),
+            expires_at=current["expires_at"],
+        )
+        return new_id, removed_count
+
     def list(self, limit: int = 20) -> list[dict[str, Any]]:
         self._storage.require_compatible_dimensions()
         rows = self._storage.list_memories(limit=limit)
@@ -191,6 +229,9 @@ class AsyncMemory:
 
     async def forget(self, id: str | None = None, tag: str | None = None) -> int:
         return await asyncio.to_thread(self._memory.forget, id, tag)
+
+    async def redact(self, id: str, remove: str) -> str:
+        return await asyncio.to_thread(self._memory.redact, id, remove)
 
     async def list(self, limit: int = 20) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._memory.list, limit)

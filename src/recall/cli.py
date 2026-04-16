@@ -34,6 +34,10 @@ def build_parser() -> argparse.ArgumentParser:
     forget.add_argument("--id", default=None, help="Memory ID")
     forget.add_argument("--tag", default=None, help="Delete memories by tag")
 
+    redact = subparsers.add_parser("redact", help="Redact literal text from a memory")
+    redact.add_argument("--id", required=True, help="Current memory ID")
+    redact.add_argument("--remove", required=True, help="Literal text to remove")
+
     subparsers.add_parser("stats", help="Show memory stats")
 
     subparsers.add_parser("rebuild-index", help="Rebuild embeddings and vector index")
@@ -63,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _run_list(memory, args.limit)
             if args.command == "forget":
                 return _run_forget(memory, args.id, args.tag)
+            if args.command == "redact":
+                return _run_redact(memory, args.id, args.remove)
             if args.command == "stats":
                 return _run_stats(memory)
             if args.command == "rebuild-index":
@@ -111,6 +117,12 @@ def _run_list(memory: Memory, limit: int) -> int:
 def _run_forget(memory: Memory, memory_id: str | None, tag: str | None) -> int:
     deleted = memory.forget(id=memory_id, tag=tag)
     print(f"Deleted {deleted} memories.")
+    return 0
+
+
+def _run_redact(memory: Memory, memory_id: str, remove: str) -> int:
+    new_id, removed_count = memory._redact_internal(id=memory_id, remove=remove)
+    print(f"Created redacted memory {new_id} (removed {removed_count} occurrence(s)).")
     return 0
 
 

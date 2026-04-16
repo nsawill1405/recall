@@ -91,10 +91,22 @@ class SQLiteStorage:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO memories (id, namespace, text, embedding, tags, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memories (
+                    id,
+                    root_id,
+                    replaces_id,
+                    is_current,
+                    namespace,
+                    text,
+                    embedding,
+                    tags,
+                    created_at,
+                    expires_at
+                )
+                VALUES (?, ?, NULL, 1, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    memory_id,
                     memory_id,
                     self.namespace,
                     text,
@@ -110,43 +122,163 @@ class SQLiteStorage:
             )
         return memory_id
 
-    def delete_memory_by_id(self, memory_id: str) -> int:
+    def get_current_memory(self, memory_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, root_id, namespace, text, tags, created_at, expires_at
+                FROM memories
+                WHERE id = ?
+                  AND namespace = ?
+                  AND is_current = 1
+                """,
+                (memory_id, self.namespace),
+            ).fetchone()
+
+        if row is None:
+            return None
+
+        return {
+            "id": str(row["id"]),
+            "root_id": str(row["root_id"]),
+            "namespace": str(row["namespace"]),
+            "text": str(row["text"]),
+            "tags": _parse_tags(row["tags"]),
+            "created_at": int(row["created_at"]),
+            "expires_at": int(row["expires_at"]) if row["expires_at"] is not None else None,
+        }
+
+    def insert_redacted_memory(
+        self,
+        previous_id: str,
+        root_id: str,
+        redacted_text: str,
+        embedding: list[float],
+        tags: list[str],
+        created_at: int,
+        expires_at: int | None,
+    ) -> str:
+        new_id = uuid.uuid4().hex
+        memory_blob = _serialize_embedding(embedding)
+
         with self._lock, self._conn:
             cursor = self._conn.execute(
-                "DELETE FROM memories WHERE id = ? AND namespace = ?",
-                (memory_id, self.namespace),
+                """
+                UPDATE memories
+                SET is_current = 0
+                WHERE id = ?
+                  AND namespace = ?
+                  AND is_current = 1
+                """,
+                (previous_id, self.namespace),
             )
-            deleted = int(cursor.rowcount or 0)
-            if deleted:
-                self._conn.execute("DELETE FROM vec_index WHERE memory_id = ?", (memory_id,))
-            return deleted
+            if int(cursor.rowcount or 0) != 1:
+                raise ValueError("memory id not found in current namespace")
+
+            self._conn.execute(
+                """
+                INSERT INTO memories (
+                    id,
+                    root_id,
+                    replaces_id,
+                    is_current,
+                    namespace,
+                    text,
+                    embedding,
+                    tags,
+                    created_at,
+                    expires_at
+                )
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id,
+                    root_id,
+                    previous_id,
+                    self.namespace,
+                    redacted_text,
+                    memory_blob,
+                    json.dumps(tags),
+                    created_at,
+                    expires_at,
+                ),
+            )
+            self._conn.execute("DELETE FROM vec_index WHERE memory_id = ?", (previous_id,))
+            self._conn.execute(
+                "INSERT OR REPLACE INTO vec_index (memory_id, embedding) VALUES (?, ?)",
+                (new_id, self._vector_param(embedding)),
+            )
+
+        return new_id
+
+    def delete_memory_by_id(self, memory_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT root_id FROM memories WHERE id = ? AND namespace = ?",
+                (memory_id, self.namespace),
+            ).fetchone()
+        if row is None or row["root_id"] is None:
+            return 0
+
+        return self._delete_lineages({str(row["root_id"])})
 
     def delete_memory_by_tag(self, tag: str) -> int:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, tags FROM memories WHERE namespace = ?",
+                """
+                SELECT root_id, tags
+                FROM memories
+                WHERE namespace = ?
+                  AND is_current = 1
+                """,
                 (self.namespace,),
             ).fetchall()
 
-        ids: list[str] = []
+        root_ids: set[str] = set()
         for row in rows:
-            tags = _parse_tags(row["tags"])
-            if tag in tags:
-                ids.append(str(row["id"]))
+            parsed_tags = _parse_tags(row["tags"])
+            if tag in parsed_tags and row["root_id"] is not None:
+                root_ids.add(str(row["root_id"]))
 
-        if not ids:
+        return self._delete_lineages(root_ids)
+
+    def _delete_lineages(self, root_ids: set[str]) -> int:
+        if not root_ids:
             return 0
 
-        placeholders = ",".join("?" for _ in ids)
+        lineage_list = sorted(root_ids)
+        placeholders = ",".join("?" for _ in lineage_list)
+
         with self._lock, self._conn:
+            deleted_rows = self._conn.execute(
+                f"""
+                SELECT id
+                FROM memories
+                WHERE namespace = ?
+                  AND root_id IN ({placeholders})
+                """,  # noqa: S608
+                [self.namespace, *lineage_list],
+            ).fetchall()
+
+            ids = [str(row["id"]) for row in deleted_rows]
+            if not ids:
+                return 0
+
             self._conn.execute(
-                f"DELETE FROM memories WHERE id IN ({placeholders})",  # noqa: S608
+                f"""
+                DELETE FROM memories
+                WHERE namespace = ?
+                  AND root_id IN ({placeholders})
+                """,  # noqa: S608
+                [self.namespace, *lineage_list],
+            )
+
+            id_placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(
+                f"DELETE FROM vec_index WHERE memory_id IN ({id_placeholders})",  # noqa: S608
                 ids,
             )
-            self._conn.execute(
-                f"DELETE FROM vec_index WHERE memory_id IN ({placeholders})",  # noqa: S608
-                ids,
-            )
+
         return len(ids)
 
     def search_memories(
@@ -193,6 +325,7 @@ class SQLiteStorage:
                 SELECT id, text, tags, created_at, expires_at
                 FROM memories
                 WHERE namespace = ?
+                  AND is_current = 1
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
@@ -215,7 +348,7 @@ class SQLiteStorage:
         with self._lock:
             total = int(
                 self._conn.execute(
-                    "SELECT COUNT(*) FROM memories WHERE namespace = ?",
+                    "SELECT COUNT(*) FROM memories WHERE namespace = ? AND is_current = 1",
                     (self.namespace,),
                 ).fetchone()[0]
             )
@@ -225,6 +358,7 @@ class SQLiteStorage:
                     SELECT COUNT(*)
                     FROM memories
                     WHERE namespace = ?
+                      AND is_current = 1
                       AND expires_at IS NOT NULL
                       AND expires_at <= ?
                     """,
@@ -249,7 +383,13 @@ class SQLiteStorage:
     def iter_memory_texts(self) -> Iterator[tuple[str, str]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, text FROM memories WHERE namespace = ? ORDER BY created_at ASC",
+                """
+                SELECT id, text
+                FROM memories
+                WHERE namespace = ?
+                  AND is_current = 1
+                ORDER BY created_at ASC
+                """,
                 (self.namespace,),
             ).fetchall()
         for row in rows:
@@ -301,6 +441,9 @@ class SQLiteStorage:
                 """
                 CREATE TABLE IF NOT EXISTS memories (
                     id TEXT PRIMARY KEY,
+                    root_id TEXT,
+                    replaces_id TEXT,
+                    is_current INTEGER NOT NULL DEFAULT 1,
                     namespace TEXT NOT NULL DEFAULT 'default',
                     text TEXT NOT NULL,
                     embedding BLOB NOT NULL,
@@ -310,6 +453,10 @@ class SQLiteStorage:
                 )
                 """
             )
+
+        self._ensure_versioning_columns()
+
+        with self._lock, self._conn:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)"
             )
@@ -319,6 +466,36 @@ class SQLiteStorage:
                 ON memories(namespace, expires_at)
                 """
             )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memories_namespace_current
+                ON memories(namespace, is_current)
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_root_id ON memories(root_id)"
+            )
+
+    def _ensure_versioning_columns(self) -> None:
+        with self._lock, self._conn:
+            columns = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(memories)").fetchall()
+            }
+
+            if "root_id" not in columns:
+                self._conn.execute("ALTER TABLE memories ADD COLUMN root_id TEXT")
+            if "is_current" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE memories ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1"
+                )
+            if "replaces_id" not in columns:
+                self._conn.execute("ALTER TABLE memories ADD COLUMN replaces_id TEXT")
+
+            self._conn.execute(
+                "UPDATE memories SET root_id = id WHERE root_id IS NULL OR root_id = ''"
+            )
+            self._conn.execute("UPDATE memories SET is_current = 1 WHERE is_current IS NULL")
 
     def _validate_metadata(self) -> DimensionMismatchError | None:
         db_dimension_raw = self._get_meta("embedding_dimension")
@@ -421,6 +598,7 @@ class SQLiteStorage:
                         FROM vec_index vi
                         JOIN memories m ON m.id = vi.memory_id
                         WHERE m.namespace = ?
+                          AND m.is_current = 1
                           AND (m.expires_at IS NULL OR m.expires_at > ?)
                         ORDER BY ann_distance ASC
                         LIMIT ?
@@ -436,6 +614,7 @@ class SQLiteStorage:
                 SELECT id, text, tags, created_at, expires_at, embedding
                 FROM memories
                 WHERE namespace = ?
+                  AND is_current = 1
                   AND (expires_at IS NULL OR expires_at > ?)
                 ORDER BY created_at DESC
                 LIMIT ?
