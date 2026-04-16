@@ -65,22 +65,6 @@ results = await mem.search("what should we remember?")
 await mem.forget(id=results[0].id)
 ```
 
-## How Search Works
-
-`search(query, top_k, tags)` works in four steps:
-
-1. Embed the query with the active embedder (OpenAI/Anthropic/Cohere/local/custom).
-2. Retrieve candidates from the current namespace, excluding expired rows:
-   - If `sqlite-vec` is available, candidate retrieval is ANN via `vec0` cosine distance.
-   - Otherwise, recall falls back to SQLite table candidates.
-3. Apply optional tag filtering.
-4. Compute cosine similarity in Python for candidates, convert to score in `[0, 1]`, sort descending, return top `k`.
-
-Versioned memory behavior:
-
-- Search only returns `is_current = 1` memory versions.
-- Redacted/superseded historical versions are retained internally but hidden from normal search/list output.
-
 ## Provider behavior
 
 Provider auto-detection order:

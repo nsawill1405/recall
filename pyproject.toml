@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "recall-ai"
 version = "0.1.0"
-description = "Local-first AI memory for Python"
+description = "Local-first memory for Python apps and AI agents"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = { file = "LICENSE" }
 authors = [{ name = "Will" }]
-keywords = ["memory", "llm", "sqlite", "vector-search", "embeddings"]
+keywords = ["memory", "sqlite", "vector-search", "embeddings", "notes", "llm"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
