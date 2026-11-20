@@ -1,6 +1,19 @@
-![recall](logo.png)
+<div align="center">
 
-# recall
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:0f2027,50:203a43,100:2c5364&height=170&section=header&text=recall&fontSize=52&fontColor=ffffff&fontAlignY=36&desc=Local-first%20memory%20for%20Python%20apps%20and%20AI%20agents&descAlignY=58&descSize=16" alt="recall" width="100%" />
+
+<img src="logo.png" alt="recall logo" width="140" />
+
+<p>
+  <img src="https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
+  <img src="https://img.shields.io/badge/SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white" alt="SQLite" />
+  <a href="https://github.com/nsawill1405/recall/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nsawill1405/recall/ci.yml?branch=main&style=for-the-badge&label=CI&logo=githubactions&logoColor=white" alt="CI" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-2c5364?style=for-the-badge" alt="License" /></a>
+</p>
+
+<p><a href="#install">Install</a> · <a href="#10-second-quickstart">10-second quickstart</a> · <a href="#api">API</a> · <a href="#api-reference">API Reference</a> · <a href="#provider-behavior">Provider behavior</a> · <a href="#cli">CLI</a></p>
+
+</div>
 
 Local-first memory for Python apps and AI agents. One file on disk, with a compact API:
 `store()`, `store_many()`, `find()`, `search()`, `edit()`, `redact()`, `forget()`,
@@ -176,3 +189,17 @@ This command updates metadata and recomputes every embedding in the namespace.
 - Storage is SQLite + `sqlite-vec` when available.
 - If `sqlite-vec` is unavailable at runtime, recall falls back to exact cosine search over stored embeddings.
 - This release is Python-only (`recall-js` is out of scope).
+
+## License
+
+[Apache-2.0](LICENSE) © William North. Issues and pull requests are welcome.
+
+---
+
+<div align="center">
+
+<sub>Made by <a href="https://github.com/nsawill1405">William North</a> · <a href="https://nsawill.co.uk">nsawill.co.uk</a></sub>
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:2c5364,50:203a43,100:0f2027&height=100&section=footer" alt="" width="100%" />
+
+</div>
